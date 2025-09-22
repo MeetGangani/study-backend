@@ -1,3 +1,4 @@
+import transcription from "./api/transcription";
 import cookieParser from "cookie-parser";
 import dotenv from "dotenv";
 import express, { Request, Response } from "express";
@@ -52,6 +53,8 @@ app.use("/api/chatbot", chat);
 app.use("/api/", diagram);
 app.use("/api", board);
 app.use("/api/call", call);
+app.use("/api", transcription);
+
 // Middleware for sessions
 const SESSION_SECRET = process.env.SESSION_SECRET;
 if (!SESSION_SECRET) {
