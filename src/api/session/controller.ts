@@ -289,6 +289,8 @@ export const updateSession = async (
 
 // Add these new controller functions
 
+import { getIO } from "../../socket";
+
 export const startSession = async (
   req: AuthenticatedRequest,
   res: Response
@@ -325,6 +327,12 @@ export const startSession = async (
         startedAt: new Date(),
       }
     });
+
+    // Notify via socket for auto-recording triggers on clients
+    try {
+      const io = getIO();
+      io?.to(sessionId).emit("sessionRecordingStart", { sessionId });
+    } catch {}
 
     return res.status(200).json({ 
       message: "Session started successfully",
@@ -376,6 +384,12 @@ export const endSession = async (
         endedAt: new Date()
       }
     });
+
+    // Notify via socket for auto-recording stop and upload trigger
+    try {
+      const io = getIO();
+      io?.to(sessionId).emit("sessionRecordingStop", { sessionId });
+    } catch {}
 
     return res.status(200).json({ 
       message: "Session ended successfully",

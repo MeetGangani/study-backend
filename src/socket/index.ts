@@ -10,7 +10,11 @@ import {
 } from "./handlers/sessionHandler";
 import { handleFileEvents } from "./handlers/fileHandler";
 
+export let ioInstance: Server | null = null;
+export const getIO = () => ioInstance;
+
 export const initializeSocket = (io: Server) => {
+  ioInstance = io;
   io.on("connection", (socket) => {
     console.log("a user connected", socket.id);
 
