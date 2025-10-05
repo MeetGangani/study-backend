@@ -2,6 +2,7 @@ import { z } from "zod";
 import { db } from "../../prismaClient";
 import { TokenPayload } from "types";
 import { Response, Request } from "express";
+import type { Express } from "express";
 // Define interface for authenticated request
 interface AuthenticatedRequest extends Request {
   user?: TokenPayload;
@@ -28,6 +29,34 @@ const updateSessionSchema = z.object({
   name: z.string().min(1, "Session name is required").max(100),
   description: z.string().optional(),
 });
+
+// Simple extractive summarizer using frequency-weighted sentences
+function generateExtractiveSummary(text: string, maxSentences: number = 5): string {
+  if (!text) return "";
+  const sentences = text
+    .replace(/\s+/g, " ")
+    .match(/[^.!?]+[.!?]+/g) || [text];
+  const words = text.toLowerCase().match(/[a-zA-Z0-9']+/g) || [];
+  const stop = new Set([
+    "the","is","in","at","of","a","an","and","or","to","for","on","with","as","by","it","this","that","from","are","be","was","were","will","can","could"
+  ]);
+  const freq: Record<string, number> = {};
+  for (const w of words) {
+    if (stop.has(w)) continue;
+    freq[w] = (freq[w] || 0) + 1;
+  }
+  const scores = sentences.map((s) => {
+    const sw = s.toLowerCase().match(/[a-zA-Z0-9']+/g) || [];
+    let score = 0;
+    for (const w of sw) score += freq[w] || 0;
+    // normalize by sentence length to avoid bias toward long sentences
+    return score / Math.max(5, sw.length);
+  });
+  const indexed = sentences.map((s, i) => ({ s, i, score: scores[i] }));
+  indexed.sort((a, b) => b.score - a.score);
+  const top = indexed.slice(0, Math.min(maxSentences, indexed.length)).sort((a, b) => a.i - b.i);
+  return top.map((t) => t.s.trim()).join(" ");
+}
 
 // get all sessions
 export const getAllSessions = async (
@@ -284,6 +313,94 @@ export const updateSession = async (
   } catch (error) {
     console.error("Error updating session:", error);
     res.status(500).json({ message: "Failed to update session" });
+  }
+};
+
+// Save transcript text from client (Web Speech API) and generate summary
+export const uploadTranscript = async (
+  req: AuthenticatedRequest,
+  res: Response
+) => {
+  try {
+    const user = req.user;
+    if (!user) return res.status(401).json({ message: "Unauthorized" });
+
+    const sessionId = req.params.sessionId;
+    const bodySchema = z.object({
+      transcript: z.string().min(1),
+      lang: z.string().optional(),
+    });
+    const parsed = bodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ message: "Invalid payload" });
+    }
+
+    const session = await db.session.findUnique({ where: { id: sessionId } });
+    if (!session) return res.status(404).json({ message: "Session not found" });
+
+    // ensure user is in the group
+    const isMember = await db.group.findFirst({
+      where: { id: session.groupId, memberIds: { has: user.id } },
+    });
+    if (!isMember) return res.status(403).json({ message: "Forbidden" });
+
+    const transcript = parsed.data.transcript;
+    const lang = parsed.data.lang;
+
+    // naive merge: append if existing
+    const existingTranscript = (session as any).transcript as string | undefined;
+    const mergedTranscript = existingTranscript
+      ? existingTranscript + "\n" + transcript
+      : transcript;
+
+    // mark status pending before generating summary
+    await db.session.update({
+      where: { id: sessionId },
+      // cast to any until prisma generate is run
+      data: { transcript: mergedTranscript, summaryStatus: "pending", transcriptLang: lang } as any,
+    });
+
+    // generate extractive summary synchronously (fast)
+    const summary = generateExtractiveSummary(mergedTranscript, 5);
+    await db.session.update({
+      where: { id: sessionId },
+      data: { summary, summaryStatus: "completed" } as any,
+    });
+
+    return res.status(200).json({ message: "Transcript saved", summary });
+  } catch (err) {
+    console.error("uploadTranscript error", err);
+    return res.status(500).json({ message: "Failed to save transcript" });
+  }
+};
+
+export const getSummary = async (
+  req: AuthenticatedRequest,
+  res: Response
+) => {
+  try {
+    const user = req.user;
+    if (!user) return res.status(401).json({ message: "Unauthorized" });
+
+    const sessionId = req.params.sessionId;
+    const session = await db.session.findUnique({ where: { id: sessionId } });
+    if (!session) return res.status(404).json({ message: "Session not found" });
+
+    const isMember = await db.group.findFirst({
+      where: { id: session.groupId, memberIds: { has: user.id } },
+    });
+    if (!isMember) return res.status(403).json({ message: "Forbidden" });
+
+    const s: any = session as any;
+    return res.status(200).json({
+      transcript: s.transcript || null,
+      summary: s.summary || null,
+      status: s.summaryStatus || (s.summary ? "completed" : "not_available"),
+      lang: s.transcriptLang || null,
+    });
+  } catch (err) {
+    console.error("getSummary error", err);
+    return res.status(500).json({ message: "Failed to fetch summary" });
   }
 };
 
