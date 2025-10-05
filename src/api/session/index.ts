@@ -16,6 +16,12 @@ router.get('/group/:groupId', authenticateToken, controller.getAllSessions);
 // @ts-ignore   
 router.delete('/:sessionId', authenticateToken, controller.deleteSession);
 
+// Transcript upload and summary retrieval
+// @ts-ignore
+router.post('/:sessionId/transcript', authenticateToken, controller.uploadTranscript);
+// @ts-ignore
+router.get('/:sessionId/summary', authenticateToken, controller.getSummary);
+
 // Update session by ID
 // @ts-ignore
 router.put('/:sessionId', authenticateToken, controller.updateSession);

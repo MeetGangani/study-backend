@@ -97,6 +97,11 @@ model Session {
   isStarted     Boolean   @default(false)
   startedAt     DateTime?
   endedAt       DateTime?
+  // Auto transcript and summary fields
+  transcript    String?
+  summary       String?
+  summaryStatus String?   // pending | completed | failed
+  transcriptLang String?  // BCP-47 tag for client transcription, e.g. "en-US"
   groupId       String    @db.ObjectId
   group         Group     @relation(fields: [groupId], references: [id], onDelete: Cascade)
   creatorID     String    @db.ObjectId
