@@ -58,6 +58,47 @@ function generateExtractiveSummary(text: string, maxSentences: number = 5): stri
   return top.map((t) => t.s.trim()).join(" ");
 }
 
+async function summarizeWithGemini(transcript: string): Promise<string | null> {
+  try {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return null;
+    // Trim transcript to avoid excessive token usage
+    const maxChars = 16000;
+    const input = transcript.length > maxChars ? transcript.slice(-maxChars) : transcript;
+    const body = {
+      contents: [
+        {
+          role: "user",
+          parts: [
+            {
+              text:
+                "You are an expert note-taker for student study sessions. Summarize the discussion into clear, concise bullet points with headings, action items, and key takeaways. Keep it objective and avoid fabrications. Transcript begins:\n\n" +
+                input,
+            },
+          ],
+        },
+      ],
+      generationConfig: {
+        temperature: 0.3,
+      },
+    };
+    const resp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }
+    );
+    if (!resp.ok) return null;
+    const data: any = await resp.json();
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    return typeof text === "string" && text.trim().length > 0 ? text.trim() : null;
+  } catch (e) {
+    return null;
+  }
+}
+
 // get all sessions
 export const getAllSessions = async (
   req: AuthenticatedRequest,
@@ -360,8 +401,9 @@ export const uploadTranscript = async (
       data: { transcript: mergedTranscript, summaryStatus: "pending", transcriptLang: lang } as any,
     });
 
-    // generate extractive summary synchronously (fast)
-    const summary = generateExtractiveSummary(mergedTranscript, 5);
+    // Try Gemini; if unavailable or fails, fallback to extractive summary
+    const llmSummary = await summarizeWithGemini(mergedTranscript);
+    const summary = llmSummary || generateExtractiveSummary(mergedTranscript, 5);
     await db.session.update({
       where: { id: sessionId },
       data: { summary, summaryStatus: "completed" } as any,
