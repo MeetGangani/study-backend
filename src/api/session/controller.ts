@@ -2,7 +2,9 @@ import { z } from "zod";
 import { db } from "../../prismaClient";
 import { TokenPayload } from "types";
 import { Response, Request } from "express";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import type { Express } from "express";
+import { log } from "console";
 // Define interface for authenticated request
 interface AuthenticatedRequest extends Request {
   user?: TokenPayload;
@@ -24,38 +26,48 @@ const createSessionSchema = z.object({
   time: z.string().transform((str) => new Date(str)),
 });
 
-const updateSessionSchema = z.object({
-  sessionId: z.string().min(1, "Session ID is required"),
-  name: z.string().min(1, "Session name is required").max(100),
-  description: z.string().optional(),
-});
-
-// Simple extractive summarizer using frequency-weighted sentences
-function generateExtractiveSummary(text: string, maxSentences: number = 5): string {
-  if (!text) return "";
-  const sentences = text
-    .replace(/\s+/g, " ")
-    .match(/[^.!?]+[.!?]+/g) || [text];
-  const words = text.toLowerCase().match(/[a-zA-Z0-9']+/g) || [];
-  const stop = new Set([
-    "the","is","in","at","of","a","an","and","or","to","for","on","with","as","by","it","this","that","from","are","be","was","were","will","can","could"
-  ]);
-  const freq: Record<string, number> = {};
-  for (const w of words) {
-    if (stop.has(w)) continue;
-    freq[w] = (freq[w] || 0) + 1;
+async function summarizeWithGemini(transcript: string): Promise<string | null> {
+  try {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return null;
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+    const maxChars = 16000;
+    const input = transcript.length > maxChars ? transcript.slice(-maxChars) : transcript;
+    const prompt = [
+      "You are an expert note-taker for student study sessions.",
+      "Create a faithful, concise summary ONLY using information present in the transcript.",
+      "If the transcript lacks substantive content, respond exactly with: INSUFFICIENT_CONTENT.",
+      "Otherwise, produce:",
+      "- A 1-2 sentence overview",
+      "- Bullet points grouped by topic (facts only)",
+      "- Action items (who/what/when if clearly stated)",
+      "Do NOT invent details or repeat the transcript verbatim.",
+      "Transcript:",
+      input,
+    ].join("\n");
+    const result = await model.generateContent({
+      contents: [{ role: "user", parts: [{ text: prompt }]}],
+      generationConfig: {
+        temperature: 0.1,
+        topK: 1,
+      },
+    });
+    const text = result?.response?.text?.();
+    console.log("summary is:",text);
+    
+    return typeof text === "string" && text.trim().length > 0 ? text.trim() : null;
+  } catch (e) {
+    return null;
   }
-  const scores = sentences.map((s) => {
-    const sw = s.toLowerCase().match(/[a-zA-Z0-9']+/g) || [];
-    let score = 0;
-    for (const w of sw) score += freq[w] || 0;
-    // normalize by sentence length to avoid bias toward long sentences
-    return score / Math.max(5, sw.length);
-  });
-  const indexed = sentences.map((s, i) => ({ s, i, score: scores[i] }));
-  indexed.sort((a, b) => b.score - a.score);
-  const top = indexed.slice(0, Math.min(maxSentences, indexed.length)).sort((a, b) => a.i - b.i);
-  return top.map((t) => t.s.trim()).join(" ");
+}
+
+function hasSufficientContent(t: string): boolean {
+  const stripped = t.replace(/\s+/g, " ").trim();
+  if (stripped.length < 80) return false;
+  const tokens = (stripped.toLowerCase().match(/[a-z0-9']+/g) || []);
+  const unique = new Set(tokens);
+  return unique.size >= 20;
 }
 
 // get all sessions
@@ -353,21 +365,34 @@ export const uploadTranscript = async (
       ? existingTranscript + "\n" + transcript
       : transcript;
 
-    // mark status pending before generating summary
+    // mark status pending and generate summary immediately using Gemini 2.5 Flash
     await db.session.update({
       where: { id: sessionId },
-      // cast to any until prisma generate is run
       data: { transcript: mergedTranscript, summaryStatus: "pending", transcriptLang: lang } as any,
     });
 
-    // generate extractive summary synchronously (fast)
-    const summary = generateExtractiveSummary(mergedTranscript, 5);
-    await db.session.update({
-      where: { id: sessionId },
-      data: { summary, summaryStatus: "completed" } as any,
-    });
+    if (!hasSufficientContent(mergedTranscript)) {
+      await db.session.update({
+        where: { id: sessionId },
+        data: { summaryStatus: "failed" } as any,
+      });
+      return res.status(200).json({ message: "Transcript saved", status: "failed" });
+    }
 
-    return res.status(200).json({ message: "Transcript saved", summary });
+    const llmSummary = await summarizeWithGemini(mergedTranscript);
+    if (llmSummary && llmSummary.trim().length > 0 && llmSummary.trim() !== "INSUFFICIENT_CONTENT") {
+      await db.session.update({
+        where: { id: sessionId },
+        data: { summary: llmSummary.trim(), summaryStatus: "completed" } as any,
+      });
+      return res.status(200).json({ message: "Transcript saved", status: "completed" });
+    } else {
+      await db.session.update({
+        where: { id: sessionId },
+        data: { summaryStatus: "failed" } as any,
+      });
+      return res.status(500).json({ message: "Failed to generate summary", status: "failed" });
+    }
   } catch (err) {
     console.error("uploadTranscript error", err);
     return res.status(500).json({ message: "Failed to save transcript" });
@@ -403,6 +428,8 @@ export const getSummary = async (
     return res.status(500).json({ message: "Failed to fetch summary" });
   }
 };
+
+// removed regenerateSummary; summary generation happens during transcript upload
 
 // Add these new controller functions
 
