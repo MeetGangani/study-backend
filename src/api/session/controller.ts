@@ -356,19 +356,38 @@ export const uploadTranscript = async (
     });
     if (!isMember) return res.status(403).json({ message: "Forbidden" });
 
-    const transcript = parsed.data.transcript;
+     const transcript = parsed.data.transcript.trim();
     const lang = parsed.data.lang;
 
-    // naive merge: append if existing
-    const existingTranscript = (session as any).transcript as string | undefined;
-    const mergedTranscript = existingTranscript
-      ? existingTranscript + "\n" + transcript
-      : transcript;
+    // Prepare a speaker-labeled segment using the authenticated user's identity
+    const newSegment = {
+      speakerId: user.id,
+      speakerName: user.name,
+      atMs: Date.now(),
+      text: transcript,
+    } as any;
 
-    // mark status pending and generate summary immediately using Gemini 2.5 Flash
+    // Merge into existing segments and plain transcript
+    const existingTranscript = (session as any).transcript as string | undefined;
+    const existingSegments = ((session as any).transcriptSegments as any[]) || [];
+
+    const mergedSegments = Array.isArray(existingSegments)
+      ? [...existingSegments, newSegment]
+      : [newSegment];
+
+    const mergedTranscript = existingTranscript
+      ? `${existingTranscript}\n${newSegment.speakerName || "Unknown"}: ${transcript}`
+      : `${newSegment.speakerName || "Unknown"}: ${transcript}`;
+
+    // Mark status pending and generate summary immediately using Gemini 2.5 Flash
     await db.session.update({
       where: { id: sessionId },
-      data: { transcript: mergedTranscript, summaryStatus: "pending", transcriptLang: lang } as any,
+      data: {
+        transcript: mergedTranscript,
+        transcriptSegments: mergedSegments as any,
+        summaryStatus: "pending",
+        transcriptLang: lang,
+      } as any,
     });
 
     if (!hasSufficientContent(mergedTranscript)) {
@@ -422,6 +441,7 @@ export const getSummary = async (
       summary: s.summary || null,
       status: s.summaryStatus || (s.summary ? "completed" : "not_available"),
       lang: s.transcriptLang || null,
+      transcriptSegments: s.transcriptSegments || null,
     });
   } catch (err) {
     console.error("getSummary error", err);
@@ -529,5 +549,107 @@ export const endSession = async (
   } catch (error) {
     console.error("Error ending session:", error);
     return res.status(500).json({ message: "Failed to end session" });
+  }
+};
+
+// New: Upload mixed audio and run diarization with Deepgram
+export const uploadSessionAudio = async (
+  req: AuthenticatedRequest,
+  res: Response
+) => {
+  try {
+    const user = req.user;
+    if (!user) return res.status(401).json({ message: "Unauthorized" });
+
+    const sessionId = req.params.sessionId;
+    const session = await db.session.findUnique({ where: { id: sessionId } });
+    if (!session) return res.status(404).json({ message: "Session not found" });
+
+    // ensure user is in the group
+    const isMember = await db.group.findFirst({
+      where: { id: session.groupId, memberIds: { has: user.id } },
+    });
+    if (!isMember) return res.status(403).json({ message: "Forbidden" });
+
+    const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
+    if (!DEEPGRAM_API_KEY) {
+      return res.status(500).json({ message: "Server not configured for diarization" });
+    }
+
+    // Read raw audio bytes from request
+    const chunks: Buffer[] = [];
+    await new Promise<void>((resolve, reject) => {
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => resolve());
+      req.on("error", reject);
+    });
+    const audioBuffer = Buffer.concat(chunks);
+    if (audioBuffer.length === 0) {
+      return res.status(400).json({ message: "Empty audio" });
+    }
+
+    // Send to Deepgram prerecorded transcription with diarization
+    const dgRes = await fetch("https://api.deepgram.com/v1/listen?punctuate=true&diarize=true", {
+      method: "POST",
+      headers: {
+        Authorization: `Token ${DEEPGRAM_API_KEY}`,
+        "Content-Type": req.headers["content-type"] || "audio/webm",
+      },
+      body: audioBuffer,
+    } as any);
+
+    if (!dgRes.ok) {
+      const text = await dgRes.text().catch(() => "");
+      return res.status(502).json({ message: "Diarization provider error", detail: text });
+    }
+    const dgJson: any = await dgRes.json();
+
+    // Map Deepgram response to segments
+    // Expecting structure: results.channels[0].alternatives[0].paragraphs.paragraphs[*] with speaker and transcript
+    const segments: Array<{ startMs: number; endMs: number; speaker: string; text: string; }>
+      = [];
+    try {
+      const paragraphs = dgJson?.results?.channels?.[0]?.alternatives?.[0]?.paragraphs?.paragraphs || [];
+      for (const p of paragraphs) {
+        const speaker = p?.speaker || `Speaker ${p?.speaker || "?"}`;
+        const startMs = Math.round((p?.start || 0) * 1000);
+        const endMs = Math.round((p?.end || 0) * 1000);
+        const text = (p?.transcript || "").trim();
+        if (text) segments.push({ startMs, endMs, speaker: String(speaker), text });
+      }
+      // Fallback if paragraphs missing: flatten words by speaker
+      if (segments.length === 0) {
+        const words = dgJson?.results?.channels?.[0]?.alternatives?.[0]?.words || [];
+        let current: any = null;
+        for (const w of words) {
+          const spk = w?.speaker || "Speaker ?";
+          if (!current || current.speaker !== spk) {
+            if (current) segments.push(current);
+            current = { speaker: spk, startMs: Math.round((w.start || 0) * 1000), endMs: Math.round((w.end || 0) * 1000), text: w.punctuated_word || w.word || "" };
+          } else {
+            current.text += (w.punctuated_word ? ` ${w.punctuated_word}` : w.word ? ` ${w.word}` : "");
+            current.endMs = Math.round((w.end || current.endMs / 1000) * 1000);
+          }
+        }
+        if (current) segments.push(current);
+      }
+    } catch (e) {
+      // noop, segments might be empty
+    }
+
+    // Store segments and also update transcript plain text
+    const plain = segments.map(s => `${s.speaker}: ${s.text}`).join("\n");
+    await db.session.update({
+      where: { id: sessionId },
+      data: {
+        transcriptSegments: segments as any,
+        transcript: plain,
+      } as any,
+    });
+
+    return res.status(200).json({ message: "Uploaded", segmentsCount: segments.length });
+  } catch (err) {
+    console.error("uploadSessionAudio error", err);
+    return res.status(500).json({ message: "Failed to process audio" });
   }
 };

@@ -102,6 +102,7 @@ model Session {
   summary       String?
   summaryStatus String?   // pending | completed | failed
   transcriptLang String?  // BCP-47 tag for client transcription, e.g. "en-US"
+  transcriptSegments Json?
   groupId       String    @db.ObjectId
   group         Group     @relation(fields: [groupId], references: [id], onDelete: Cascade)
   creatorID     String    @db.ObjectId

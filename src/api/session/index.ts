@@ -21,6 +21,8 @@ router.delete('/:sessionId', authenticateToken, controller.deleteSession);
 router.post('/:sessionId/transcript', authenticateToken, controller.uploadTranscript);
 // @ts-ignore
 router.get('/:sessionId/summary', authenticateToken, controller.getSummary);
+// @ts-ignore
+router.post('/:sessionId/audio', authenticateToken, controller.uploadSessionAudio);
 
 // Update session by ID
 // @ts-ignore
