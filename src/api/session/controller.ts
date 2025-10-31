@@ -64,10 +64,11 @@ async function summarizeWithGemini(transcript: string): Promise<string | null> {
 
 function hasSufficientContent(t: string): boolean {
   const stripped = t.replace(/\s+/g, " ").trim();
-  if (stripped.length < 80) return false;
+  // Relax thresholds so summaries generate more consistently with shorter transcripts
+  if (stripped.length < 40) return false;
   const tokens = (stripped.toLowerCase().match(/[a-z0-9']+/g) || []);
   const unique = new Set(tokens);
-  return unique.size >= 20;
+  return unique.size >= 12;
 }
 
 // get all sessions
@@ -644,10 +645,29 @@ export const uploadSessionAudio = async (
       data: {
         transcriptSegments: segments as any,
         transcript: plain,
+        summaryStatus: "pending",
       } as any,
     });
 
-    return res.status(200).json({ message: "Uploaded", segmentsCount: segments.length });
+    // Optionally generate a summary now if there's enough content
+    if (hasSufficientContent(plain)) {
+      const llmSummary = await summarizeWithGemini(plain);
+      if (llmSummary && llmSummary.trim().length > 0 && llmSummary.trim() !== "INSUFFICIENT_CONTENT") {
+        await db.session.update({
+          where: { id: sessionId },
+          data: { summary: llmSummary.trim(), summaryStatus: "completed" } as any,
+        });
+        return res.status(200).json({ message: "Uploaded", segmentsCount: segments.length, status: "completed" });
+      } else {
+        await db.session.update({
+          where: { id: sessionId },
+          data: { summaryStatus: "failed" } as any,
+        });
+        return res.status(200).json({ message: "Uploaded", segmentsCount: segments.length, status: "failed" });
+      }
+    }
+
+    return res.status(200).json({ message: "Uploaded", segmentsCount: segments.length, status: "pending" });
   } catch (err) {
     console.error("uploadSessionAudio error", err);
     return res.status(500).json({ message: "Failed to process audio" });
