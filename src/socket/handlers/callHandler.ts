@@ -7,6 +7,7 @@ interface ActiveCall {
   initiatorName: string;
   participants: Set<string>;
   startedAt: string;
+  mediaType?: 'audio' | 'video';
 }
 
 // Store active calls - Map<groupId, ActiveCall>
@@ -39,7 +40,7 @@ export const handleCallEvents = (io: Server, socket: Socket) => {
   });
 
   // Handle starting a new call (WhatsApp style)
-  socket.on("call_started", ({ groupId, callId, initiatedBy, initiatorName }) => {
+  socket.on("call_started", ({ groupId, callId, initiatedBy, initiatorName, mediaType }) => {
     try {
       console.log(`[Call] New call started in group ${groupId} by ${initiatorName}`);
       
@@ -53,7 +54,8 @@ export const handleCallEvents = (io: Server, socket: Socket) => {
         initiatedBy,
         initiatorName,
         participants: new Set([initiatedBy]),
-        startedAt: new Date().toISOString()
+        startedAt: new Date().toISOString(),
+        mediaType: mediaType === 'video' ? 'video' : 'audio',
       };
       
       // Store the active call
