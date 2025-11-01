@@ -86,7 +86,7 @@ export const generateResponse = async (
       `${msg.role}: ${msg.content}`
     );
 
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
     const result = await model.generateContentStream(messageStrings);
 
     console.log(`[Chatbot] User ${user.name}: ${prompt}`);
